@@ -52,12 +52,16 @@ import asyncio
 import json
 import os
 import random
+import re
 import nest_asyncio
 from pathlib import Path
 from typing import Dict, Tuple
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import (
+    Update,
+    MessageEntity
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -288,6 +292,7 @@ def chat_probs(chat_id: int) -> Tuple[float, float, float]:
 
 # ---- Handlers: messages ----------------------------------------------------------
 
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Reply to group messages using keyword/mention/general logic."""
     chat = update.effective_chat
@@ -301,20 +306,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         print(f"Chat {chat_id} is inactive, skipping")
         return
 
-    text = message.text.lower()
+    text = message.text
+    text_lower = text.lower()
     print(f"Received message in chat {chat_id}: {text}")
 
     now = asyncio.get_event_loop().time()
     if now < cooldowns_until.get(chat_id, 0.0):
-        print(f"Chat {chat_id} is in cooldown, skipping")
+        remaining = int(cooldowns_until.get(chat_id, 0.0) - now)
+        print(f"Chat {chat_id} is in cooldown ({remaining}s remaining), skipping")
         return
 
     kprob, mprob, gprob = chat_probs(chat_id)
     print(f"Chat probabilities: k={kprob}, m={mprob}, g={gprob}")
 
-    # Keyword replies
+    # ---- Collect actual @mentions from message entities (case-insensitive) ----
+    mentioned_usernames = set()
+    if message.entities:
+        for ent in message.entities:
+            if ent.type == "mention":
+                # This slice includes the '@', e.g. '@Founder'
+                uname = text[ent.offset : ent.offset + ent.length]
+                mentioned_usernames.add(uname.lower())
+    if mentioned_usernames:
+        print(f"Detected mentions in message: {mentioned_usernames}")
+
+    # ---- 1) Selective @username triggers from KEYWORDS ------------------------
+    # Only trigger if the message actually @mentions a username that exists as a KEYWORDS key.
+    # Example KEYWORDS keys: "@founder", "@marketer", "@me"
+    username_keys_lower = {k.lower() for k in KEYWORDS.keys() if k.startswith("@")}
+    hits = mentioned_usernames.intersection(username_keys_lower)
+    if hits:
+        # If multiple usernames are mentioned, pick the first matching key
+        hit_key_lower = next(iter(hits))
+        # Find the original-cased key so we keep the replies mapped correctly
+        for original_key, responses in KEYWORDS.items():
+            if original_key.lower() == hit_key_lower:
+                print(f"Username trigger matched: {original_key}")
+                if should_reply(kprob):
+                    reply = random.choice(responses)
+                    print(f"Replying to username trigger {original_key}: {reply}")
+                    await message.reply_text(reply)
+                    cooldowns_until[chat_id] = now + COOLDOWN_SECONDS
+                    last_msg_time[chat_id] = now
+                    return
+                else:
+                    print(f"Username trigger {original_key} did not pass probability check")
+                break  # matched the key; no need to continue
+
+    # ---- 2) Keyword replies (non-@ keys), case-insensitive --------------------
     for key, responses in KEYWORDS.items():
-        if key.lower() in text:
+        if key.startswith("@"):
+            continue  # handled above
+        if key.lower() in text_lower:
             print(f"Keyword match found: {key}")
             if should_reply(kprob):
                 reply = random.choice(responses)
@@ -326,18 +369,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             else:
                 print(f"Keyword {key} detected but did not pass probability check")
 
-    # Mentions
+    # ---- 3) Bot mention (e.g. @YourBot), case-insensitive ---------------------
     mention_token = f"@{context.bot.username.lower()}"
-    if mention_token in text and should_reply(mprob):
-        flat = [r for rs in KEYWORDS.values() for r in rs]
-        reply = random.choice(flat)
-        print(f"Replying to mention: {reply}")
-        await message.reply_text(reply)
-        cooldowns_until[chat_id] = now + COOLDOWN_SECONDS
-        last_msg_time[chat_id] = now
-        return
+    if mention_token in text_lower:
+        print(f"Bot mention detected: {mention_token}")
+        if should_reply(mprob):
+            flat = [r for rs in KEYWORDS.values() for r in rs]
+            reply = random.choice(flat)
+            print(f"Replying to bot mention: {reply}")
+            await message.reply_text(reply)
+            cooldowns_until[chat_id] = now + COOLDOWN_SECONDS
+            last_msg_time[chat_id] = now
+            return
+        else:
+            print("Bot mention did not pass probability check")
 
-    # General replies
+    # ---- 4) General replies ---------------------------------------------------
     if should_reply(gprob):
         flat = [r for rs in KEYWORDS.values() for r in rs]
         reply = random.choice(flat)
@@ -345,6 +392,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text(reply)
         cooldowns_until[chat_id] = now + COOLDOWN_SECONDS
         last_msg_time[chat_id] = now
+    else:
+        print("No reply chosen by probability")
 
 
 async def track_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
