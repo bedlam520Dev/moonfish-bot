@@ -61,7 +61,7 @@ moonfish-bot/
 - **keywords.json**: Optional external file containing keywords and at least 10 responses per keyword.
 - **idle_messages.json**: Optional external file containing at least 30 idle messages.
 - **state.json**: External file containing a current state snapshot of the bot config.
-- **requirements.txt**: Python dependencies (`python-telegram-bot`, `python-dotenv`, `httpx`).
+- **requirements.txt**: Python dependencies (`python-telegram-bot`, `python-dotenv`, `httpx`, `nest_asyncio`).
 
 ---
 
